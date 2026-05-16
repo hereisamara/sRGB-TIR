@@ -9,7 +9,6 @@ from torch import nn
 from scipy.stats import entropy
 import torch.nn.functional as F
 import argparse
-from torch.autograd import Variable
 from data import ImageFolder
 import numpy as np
 import torchvision.utils as vutils
@@ -38,19 +37,29 @@ parser.add_argument('--compute_IS', action='store_true', help="whether to comput
 parser.add_argument('--compute_CIS', action='store_true', help="whether to compute Conditional Inception Score or not")
 parser.add_argument('--inception_a', type=str, default='.', help="path to the pretrained inception network for domain A")
 parser.add_argument('--inception_b', type=str, default='.', help="path to the pretrained inception network for domain B")
+parser.add_argument('--image_height', type=int, default=None, help="height to resize input images to before inference")
+parser.add_argument('--image_width', type=int, default=None, help="width to resize input images to before inference")
+parser.add_argument('--keep_original_size', action='store_true', help="disable resizing and run inference at each image's original size")
 
 opts = parser.parse_args()
 
 
 torch.manual_seed(opts.seed)
 torch.cuda.manual_seed(opts.seed)
+torch.set_grad_enabled(False)
 
 # Load experiment setting
 config = get_config(opts.config)
 input_dim = config['input_dim_a'] if opts.a2b else config['input_dim_b']
+resize_size = None
+if not opts.keep_original_size:
+    resize_height = opts.image_height or config.get('crop_image_height')
+    resize_width = opts.image_width or config.get('crop_image_width')
+    if resize_height is not None and resize_width is not None:
+        resize_size = (resize_height, resize_width)
 
 # Load the inception networks if we need to compute IS or CIIS
-if opts.compute_IS or opts.compute_IS:
+if opts.compute_IS or opts.compute_CIS:
     inception = load_inception(opts.inception_b) if opts.a2b else load_inception(opts.inception_a)
     # freeze the inception models and set eval mode
     inception.eval()
@@ -60,7 +69,7 @@ if opts.compute_IS or opts.compute_IS:
 
 # Setup model and data loader
 image_names = ImageFolder(opts.input_folder, transform=None, return_paths=True)
-data_loader = get_data_loader_folder(opts.input_folder, 1, False, new_size=None, crop=False, height=400, width=640)
+data_loader = get_data_loader_folder(opts.input_folder, 1, False, new_size=resize_size, crop=False, height=400, width=640)
 
 config['vgg_model_path'] = opts.output_path
 if opts.trainer == 'MUNIT':
@@ -80,8 +89,12 @@ except:
     trainer.gen_a.load_state_dict(state_dict['a'])
     trainer.gen_b.load_state_dict(state_dict['b'])
 
-trainer.cuda()
-trainer.train()
+trainer.gen_a.cuda()
+trainer.gen_b.cuda()
+trainer.gen_a.eval()
+trainer.gen_b.eval()
+for param in list(trainer.gen_a.parameters()) + list(trainer.gen_b.parameters()):
+    param.requires_grad_(False)
 encode = trainer.gen_a.encode if opts.a2b else trainer.gen_b.encode # encode function
 decode = trainer.gen_b.decode if opts.a2b else trainer.gen_a.decode # decode function
 
@@ -93,14 +106,14 @@ if opts.compute_CIS:
 
 if opts.trainer == 'MUNIT':
     # Start testing
-    style_fixed = Variable(torch.randn(opts.num_style, style_dim, 1, 1).cuda(), volatile=False)
+    style_fixed = torch.randn(opts.num_style, style_dim, 1, 1).cuda()
     for i, (images, names) in enumerate(zip(data_loader, image_names)):
         if opts.compute_CIS:
             cur_preds = []
         print(names[1])
-        images = Variable(images.cuda(), volatile=True)
+        images = images.cuda(non_blocking=True)
         content, _ = encode(images)
-        style = style_fixed if opts.synchronized else Variable(torch.randn(opts.num_style, style_dim, 1, 1).cuda(), volatile=False)
+        style = style_fixed if opts.synchronized else torch.randn(opts.num_style, style_dim, 1, 1).cuda()
         for j in range(opts.num_style):
             s = style[j].unsqueeze(0)
             outputs = decode(content, s)
@@ -142,7 +155,7 @@ elif opts.trainer == 'UNIT':
     # Start testing
     for i, (images, names) in enumerate(zip(data_loader, image_names)):
         print(names[1])
-        images = Variable(images.cuda(), volatile=True)
+        images = images.cuda(non_blocking=True)
         content, _ = encode(images)
 
         outputs = decode(content)

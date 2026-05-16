@@ -504,11 +504,17 @@ class LayerNorm(nn.Module):
             mean = x.view(x.size(0), -1).mean(1).view(*shape)
             std = x.view(x.size(0), -1).std(1).view(*shape)
 
-        x = (x - mean) / (std + self.eps)
+        if torch.is_grad_enabled():
+            x = (x - mean) / (std + self.eps)
+        else:
+            x.sub_(mean).div_(std + self.eps)
 
         if self.affine:
             shape = [1, -1] + [1] * (x.dim() - 2)
-            x = x * self.gamma.view(*shape) + self.beta.view(*shape)
+            if torch.is_grad_enabled():
+                x = x * self.gamma.view(*shape) + self.beta.view(*shape)
+            else:
+                x.mul_(self.gamma.view(*shape)).add_(self.beta.view(*shape))
         return x
 
 def l2normalize(v, eps=1e-12):
